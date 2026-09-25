@@ -1,0 +1,61 @@
+[package]
+name = "esmail-win32"
+description = "esMail on win32ui: a native, egui-free Windows frontend (read-only 3-pane prototype) plus the reusable message list widget. Internal to this workspace."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+# The mail core only: no egui, eframe, winit or webview (`cargo tree -p
+# esmail-win32 | grep egui` must stay empty, CI checks it).
+esmail = { path = "../esmail", default-features = false }
+anyhow.workspace = true
+chrono.workspace = true
+log.workspace = true
+# Opens the Google sign-in page in the default browser.
+opener.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+tokio.workspace = true
+toml.workspace = true
+ureq.workspace = true
+
+# Windows-only: the Direct2D/DirectWrite backend, the widget host, and the
+# HTML reading pane.
+[target.'cfg(windows)'.dependencies]
+litehtml-view-d2d = { path = "../litehtml-view-d2d" }
+win32ui = { git = "https://github.com/va1erian/win32ui.git", branch = "main" }
+# Attachment save-as/add dialogs.
+rfd.workspace = true
+# The tray icon and its menu.
+tray-icon.workspace = true
+# Only `InvalidateRect` (the scroll-invalidate workaround in message_list.rs)
+# and, in the example, the raw WM_VSCROLL/WM_MOUSEWHEEL drives for
+# --bench-scroll. Same version and feature discipline as win32ui itself.
+windows = { version = "0.62", default-features = false, features = [
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Controls",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# `--screenshot` writes a PNG.
+png = "0.17"
+
+[dev-dependencies]
+env_logger.workspace = true
+mail-mock-server = { path = "../mail-mock-server" }
+
+# `build.rs` only embeds the icon, version info and Common Controls v6 manifest
+# on Windows; the crate itself is plain Rust and builds everywhere.
+[build-dependencies]
+winresource.workspace = true
+
+[[bin]]
+name = "esmail-win32"
+path = "src/main.rs"
+
+[[example]]
+name = "message_list"

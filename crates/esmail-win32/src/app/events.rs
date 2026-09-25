@@ -1,0 +1,191 @@
+//! What the accounts' IMAP sessions report, applied to the window.
+
+use esmail::imap::{ImapCommand, ImapEvent};
+use esmail::progress::{Progress, ProgressKind};
+use esmail_win32::core_glue::{CacheEvent, NodeId};
+
+use win32ui::prelude::*;
+
+use super::queue::QueueKind;
+use super::{App, Msg};
+
+impl App {
+    /// Applies everything the core and the cache have queued. Never blocks.
+    pub(super) fn drain(&mut self, ui: &Ui<Msg>) {
+        let mut tree_changed = false;
+        for event in self.core.cache().pump() {
+            tree_changed |= self.handle_cache(ui, event);
+        }
+        for (account, event) in self.core.pump() {
+            tree_changed |= self.handle(ui, account, event);
+        }
+        self.smtp_events();
+        if tree_changed {
+            self.sync_tree();
+        }
+    }
+
+    /// Brings the tree in line with the folder model, and opens an account's node
+    /// the first time its folders are known (after that it is the user's to fold).
+    fn sync_tree(&mut self) {
+        self.tree.refresh();
+        let accounts: Vec<(usize, NodeId, bool)> = {
+            let folders = self.folders.borrow();
+            folders.children(None).into_iter().enumerate().map(|(account, node)| (account, node.id, folders.has_folders(account))).collect()
+        };
+        for (account, id, has_folders) in accounts {
+            if has_folders && self.opened_accounts.insert(account) {
+                self.tree.expand(&id, true);
+                self.restore_folds(account);
+            }
+        }
+    }
+
+    /// Re-applies the saved fold state the first time an account's folders are
+    /// known. Walks the rows in tree order so a node inside a collapsed parent
+    /// is left alone.
+    fn restore_folds(&self, account: usize) {
+        let Some(account_id) = self.config.accounts.as_slice().get(account).map(|account| account.id.as_str()) else { return };
+        let prefix = format!("{account_id}\t");
+        let collapsed: std::collections::HashSet<&str> = self.settings.collapsed_folders.iter().filter_map(|entry| entry.strip_prefix(&prefix)).collect();
+        let mut collapsed_ancestor: Option<usize> = None;
+        for (id, key, has_children, depth) in self.folders.borrow().rows_with_ids(account) {
+            if collapsed_ancestor.is_some_and(|blocked| depth > blocked) {
+                continue;
+            }
+            collapsed_ancestor = None;
+            if !has_children {
+                continue;
+            }
+            let expand = !collapsed.contains(key.as_str());
+            self.tree.expand(&id, expand);
+            if !expand {
+                collapsed_ancestor = Some(depth);
+            }
+        }
+    }
+
+    /// A folder node was folded or unfolded by the user: remember it, so the
+    /// next run opens the tree the same way.
+    pub(super) fn folder_toggled(&mut self, id: NodeId, expanded: bool) {
+        let Some((account, key)) = self.folders.borrow().row_key(id) else { return };
+        let Some(account_id) = self.config.accounts.as_slice().get(account).map(|account| account.id.clone()) else { return };
+        if self.settings.set_folder_collapsed(&account_id, &key, !expanded) {
+            self.save_settings();
+        }
+    }
+
+    /// Applies one cache event. Returns whether the folder tree needs syncing.
+    fn handle_cache(&mut self, ui: &Ui<Msg>, event: CacheEvent) -> bool {
+        match event {
+            CacheEvent::Folders { account, mailboxes } => {
+                self.folders.borrow_mut().set_cached_mailboxes(account, &mailboxes);
+                return true;
+            }
+            CacheEvent::Headers { account, mailbox, headers } => self.seed_from_cache(account, &mailbox, headers),
+            CacheEvent::Search(hits) => self.search_arrived(hits),
+            CacheEvent::DraftSaved { id, compose_id } => self.draft_saved(id, compose_id),
+            CacheEvent::OutboxEnqueued { id, compose_id } => {
+                self.outbox_enqueued(id, compose_id);
+                self.refresh_queue(QueueKind::Outbox);
+            }
+            CacheEvent::OutboxDue(items) => self.outbox_due(items),
+            CacheEvent::Drafts(drafts) => self.drafts_listed(&drafts),
+            CacheEvent::Outbox(items) => self.outbox_listed(items),
+            CacheEvent::DraftLoaded { id, compose } => self.draft_loaded(ui, id, compose),
+            CacheEvent::Failed(message) => self.banner(&format!("Cache: {message}")),
+        }
+        false
+    }
+
+    /// Applies one event. Returns whether the folder tree needs syncing.
+    fn handle(&mut self, ui: &Ui<Msg>, account: usize, event: ImapEvent) -> bool {
+        self.track_status(account, &event);
+        match event {
+            ImapEvent::Connected => {
+                self.set_status("Connected");
+                self.core.send(account, ImapCommand::FetchMailboxes);
+                if self.open.as_ref().is_some_and(|open| open.folder().account == account) {
+                    self.request_refresh();
+                }
+            }
+            ImapEvent::Disconnected => self.set_status("Disconnected, reconnecting..."),
+            ImapEvent::Error(error) => {
+                if let Some(open) = self.open.as_mut() {
+                    open.page_failed();
+                }
+                if self.progress == Some(ProgressKind::Index) {
+                    self.clear_progress(ui);
+                }
+                self.banner(&error);
+            }
+            ImapEvent::Mailboxes(mailboxes) => {
+                self.folders.borrow_mut().set_mailboxes(account, &mailboxes);
+                self.request_unread_counts(account, None);
+                return true;
+            }
+            ImapEvent::UnreadCounts(counts) => {
+                self.folders.borrow_mut().set_unread(account, counts);
+                return true;
+            }
+            ImapEvent::NewHeaders { mailbox, .. } => {
+                self.request_unread_counts(account, None);
+                if self.open.as_ref().is_some_and(|open| open.folder().account == account && open.folder().mailbox == mailbox) {
+                    self.request_refresh();
+                }
+            }
+            ImapEvent::Headers { mailbox, headers, page, total_pages, req_id, .. } => {
+                self.apply_headers(account, &mailbox, req_id, page, total_pages, headers);
+            }
+            ImapEvent::Body { uid, html, attachments, req_id } => self.body_arrived(account, uid, req_id, Ok((html, attachments))),
+            ImapEvent::BodyFailed { uid, req_id, error } => self.body_arrived(account, uid, req_id, std::result::Result::Err(error)),
+            ImapEvent::FlagsUpdated { mailbox, uid, flags, .. } => {
+                self.action_finished();
+                self.flags_updated(account, &mailbox, uid, flags);
+            }
+            ImapEvent::FlagsUpdateFailed { uid, error, .. } => {
+                self.action_finished();
+                self.banner(&format!("Could not update message {uid}: {error}"));
+            }
+            ImapEvent::Moved { mailbox, uid, dest, .. } => {
+                self.action_finished();
+                self.moved(account, &mailbox, uid, &dest);
+            }
+            ImapEvent::MoveFailed { uid, error, .. } => {
+                self.action_finished();
+                self.banner(&format!("Could not move message {uid}: {error}"));
+            }
+            ImapEvent::Exported { path } => self.export_done(path),
+            ImapEvent::ExportFailed { error } => self.export_failed(&error),
+            ImapEvent::Progress { kind, progress } => self.apply_progress(ui, kind, progress),
+            ImapEvent::MailData { mailbox, header, body, attachments } => {
+                self.core.cache().index_mail(account, &mailbox, header, body, attachments);
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// A middle-to-long operation reported: show it, or, when indexing reached
+    /// the last message, hide the bar and say it finished.
+    fn apply_progress(&mut self, ui: &Ui<Msg>, kind: ProgressKind, progress: Progress) {
+        if super::progress::index_finished(kind, progress) {
+            self.clear_progress(ui);
+            self.set_status("Download complete");
+        } else {
+            self.set_progress(ui, kind, progress);
+        }
+    }
+
+    /// Asks for unread counts: of `only`, or of every folder of `account`. A
+    /// single-folder reply leaves the other counts alone.
+    pub(super) fn request_unread_counts(&self, account: usize, only: Option<&[&str]>) {
+        let mailboxes = match only {
+            Some(names) => names.iter().map(|name| name.to_string()).collect(),
+            None => self.folders.borrow().mailbox_names(account),
+        };
+        if !mailboxes.is_empty() {
+            self.core.send(account, ImapCommand::FetchUnreadCounts { mailboxes });
+        }
+    }
+}

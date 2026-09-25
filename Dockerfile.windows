@@ -1,0 +1,41 @@
+# escape=`
+
+# Use Windows Server Core as the base image
+FROM mcr.microsoft.com/windows/servercore:ltsc2025
+
+# Set the shell to PowerShell
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue';"]
+
+# Install Chocolatey
+RUN Set-ExecutionPolicy Bypass -Scope Process -Force; `
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; `
+    iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+
+# Install build dependencies via Chocolatey. litehtml's `cc`-crate build
+# compiles straight through visualstudio2022buildtools' MSVC toolchain
+# (cl.exe/link.exe), the same toolchain rustup/cargo already need on Windows,
+# so nothing extra is required for it specifically. git is kept since nothing
+# here has confirmed cargo's own git-fetching (used for the `litehtml` git
+# dependency) works without a system git binary on Windows.
+RUN choco install -y `
+    visualstudio2022buildtools `
+    visualstudio2022-workload-vctools `
+    rustup `
+    git
+
+# Configure Rust
+RUN rustup-init.exe -y --default-toolchain stable --profile minimal
+RUN $env:Path += ';C:\Users\ContainerUser\.cargo\bin'; `
+    [Environment]::SetEnvironmentVariable('Path', $env:Path, [EnvironmentVariableTarget]::Machine)
+
+# Set the working directory
+WORKDIR C:\ebrowser
+
+# Copy the project files
+COPY . .
+
+# Build the application
+RUN cargo build --release
+
+# Set the entrypoint
+# CMD ["target\\release\\ebrowser.exe"]

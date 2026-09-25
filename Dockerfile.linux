@@ -1,0 +1,28 @@
+# Use an official Rust image as a parent image
+FROM rust:1.85-slim-bookworm
+
+# Install system dependencies. litehtml's `cc`-crate build only needs a C/C++
+# compiler (build-essential) and pkg-config (probed by openssl-sys and
+# wayland-sys); nothing here needs bindgen/libclang since the crate ships
+# pre-generated FFI bindings by default. libssl-dev is for native-tls
+# (async-imap/lettre) and libdbus-1-dev is for keyring's Linux secret-service
+# backend. Verified by a clean `cargo build --workspace` against exactly this
+# package set in a bare rust:slim-bookworm container.
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    libdbus-1-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set the working directory
+WORKDIR /usr/src/ebrowser
+
+# Copy the current directory contents into the container at /usr/src/ebrowser
+COPY . .
+
+# Build the application
+RUN cargo build --release
+
+# Set the entrypoint (optional, for running the built artifact)
+# CMD ["./target/release/ebrowser"]

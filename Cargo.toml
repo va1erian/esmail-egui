@@ -1,0 +1,135 @@
+[workspace]
+members = ["crates/egui-litehtml-webview", "crates/litehtml-view-d2d", "crates/esmail", "crates/esmail-win32", "crates/mail-mock-server"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-only"
+
+[workspace.dependencies]
+# GUI
+eframe = { version = "0.36.2", default-features = false, features = ["glow", "default_fonts", "links", "x11", "wayland"] }
+egui = "0.36.2"
+egui_glow = "0.36.2"
+# Enumerating monitors for off-screen window recovery (window_fit.rs). Must
+# match the winit eframe builds against so `Frame::winit_window()`'s handle
+# type is the same crate instance; it is already in the tree via eframe. No
+# default features, or it would pull winit's Wayland CSD backend on top of
+# eframe's own configuration.
+winit = { version = "0.30", default-features = false }
+
+# HTML/CSS rendering engine for message bodies (litehtml migration -- see
+# PLAN.md). JS-less by design: no legitimate mail client executes JS in HTML
+# email anyway, and having no JS engine is what keeps the binary small. `va1erian/litehtml-rs` carries a Windows/MSVC build
+# fix on top of upstream `franzos/litehtml-rs` -- not yet released upstream,
+# hence the git dep. Its `master` also bumps the vendored C++ litehtml to
+# `va1erian/litehtml`'s `memoize-table-cell-measurement`. That memoization is
+# REQUIRED for real mail: without it, layout time is exponential in table
+# nesting depth, and a marketing mail with tables nested 17 deep never
+# finished laying out (5-8 levels took many seconds). Do not pin this to a
+# commit older than that bump.
+# The `element-tag-attr` branch is `master` plus `Element::tag_name()` and
+# `Element::attr()`, which the link table (links.rs) needs to read each anchor's
+# `href` off the laid-out document. Go back to `master` once it is merged.
+#
+# Deliberately without litehtml's `pixbuf` feature: that is its own tiny-skia +
+# cosmic-text rasterizer, which this workspace no longer uses (messages are
+# painted with egui's own painter -- see egui-litehtml-webview's painter.rs).
+# Leaving it out removes about 1.3 MiB from the release binary.
+litehtml = { git = "https://github.com/va1erian/litehtml-rs.git", branch = "element-tag-attr", features = ["email"] }
+
+# Async / IO
+tokio = { version = "1", features = ["full"] }
+tokio-native-tls = "0.3"
+futures = "0.3"
+
+# SMTP sending (B7).
+lettre = { version = "0.11", default-features = false, features = ["tokio1", "tokio1-native-tls", "smtp-transport", "builder"] }
+
+# Mail
+async-imap = { version = "0.9", default-features = false, features = ["runtime-tokio"] }
+mailparse = "0.15"
+# Local-time formatting of message dates in the list (`MailHeader::local_date_time`).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Coloured emoji artwork (PNG only; the SVG set needs a rasterizer) and the
+# grapheme segmentation that finds each emoji in a string -- see `emoji.rs`.
+twemoji-assets = { version = "1", default-features = false, features = ["png"] }
+unicode-segmentation = "1"
+# HTML sanitization for message bodies before they reach the webview (B5).
+ammonia = "4"
+# Parses the CSS of a message's `<style>` blocks so they can be filtered (css.rs).
+# Same major version ammonia itself uses for `style=""` attributes.
+cssparser = { version = "0.37", default-features = false }
+# Attachment save-as / open-with (B6).
+rfd = "0.15"
+opener = "0.7"
+# System tray icon + menu, so the window can be minimized-to-tray instead of
+# exiting the process (B10 -- notifications need the app alive after the
+# window closes). Talks to the OS tray directly; default-features off drops
+# the Linux-only gtk/libxdo pulls, which are dead weight on the Windows-only
+# feature this backs. Windows-only dependency -- see crates/esmail/Cargo.toml.
+tray-icon = { version = "0.24", default-features = false }
+# Windows toast notifications for new mail (B10), called through the WinRT
+# `ToastNotificationManager` API directly. This replaced `winrt-notification`,
+# which is a thin wrapper that hides the toast's `Activated` event -- the one
+# thing needed to open the right account when a toast is clicked. Only the
+# features used are enabled: the toast classes, the XML document they are built
+# from, `TypedEventHandler`, and the thread pool the toasts are shown on
+# (its threads are already COM-initialised, so no `unsafe` call is needed). Windows-only dependency -- see crates/esmail/Cargo.toml.
+windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom", "Foundation", "System_Threading", "Win32_System_Threading"] }
+
+# Storage / secrets
+# `esmail` is the only crate in the workspace that depends on rusqlite, so a
+# plain lower bound is enough.
+rusqlite = { version = ">=0.37", features = ["bundled"] }
+keyring = "3.2"
+secrecy = "0.10"
+directories = "5"
+toml = "0.8"
+
+# Misc
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+url = "2.5"
+log = "0.4"
+env_logger = "0.11"
+base64 = "0.22"
+# Screenshot dumps and message-body inline images. `["png"]` was pinned
+# narrower than the formats attachments and inline images commonly use
+# (jpeg/gif too).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
+# Synchronous HTTP client. litehtml has no network layer of its own by
+# design (see the `litehtml` dependency above) -- this is what main.rs uses
+# to fetch a dev-only ESMAIL_PREVIEW=<http url> page, and what
+# MessageViewHandler uses to fetch a remote image once the user has opted
+# in via "Load remote images" (B5 in PLAN.md).
+ureq = "3"
+# OAuth2 sign-in (oauth.rs): PKCE needs a SHA-256 and OS randomness, and the
+# token endpoint answers in JSON. Deliberately small pieces rather than an
+# `oauth2` crate -- the whole flow is two HTTP form posts and a loopback
+# redirect, and that crate would pull in its own HTTP stack next to `ureq`.
+sha2 = "0.10"
+getrandom = "0.3"
+serde_json = "1"
+# Safe registry access for `shell.rs` (the notification registration under HKCU,
+# the taskbar theme), from the same family as `windows` above and sharing its
+# core crates. Windows-only, see crates/esmail/Cargo.toml.
+windows-registry = "0.6"
+# The local IPC transport between esMail's processes (`ipc/local.rs`): a named
+# pipe on Windows, a Unix domain socket elsewhere, behind one API. Safe Rust on
+# our side; its `SecurityDescriptor::deserialize` is what lets the Windows pipe
+# be restricted to its owner without an `unsafe` block.
+interprocess = { version = "2.4", features = ["tokio"] }
+# UTF-16 strings for that security descriptor (an SDDL string). Windows-only.
+widestring = "1"
+# Embeds the application icon and version info in `esmail.exe` (`build.rs`).
+winresource = "0.1"
+
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Link Time Optimization (further reduces size, increases build time)
+codegen-units = 1   # Single codegen unit for better optimization
+panic = "abort"     # No unwinding on panic
+strip = true        # Automatically strip symbols from the binary
