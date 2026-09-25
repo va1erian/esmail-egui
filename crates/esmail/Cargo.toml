@@ -17,10 +17,10 @@ required-features = ["egui-frontend"]
 
 [features]
 # The GUI frontend's toolkit. On by default so `cargo build`/`cargo test` and
-# the shipped binary are unchanged; a non-egui consumer of the library (the
-# future esmail-win32 crate) turns default-features off and links none of
-# these. The library itself has no egui left after the emoji/screenshot/icons
-# split -- this only decides whether the binary and the egui deps exist.
+# the shipped binary are unchanged; a non-egui consumer of the library can
+# turn default-features off and link none of these. The library itself has no
+# egui left after the emoji/screenshot/icons split -- this only decides
+# whether the binary and the egui deps exist.
 default = ["egui-frontend"]
 egui-frontend = [
     "dep:egui-litehtml-webview",

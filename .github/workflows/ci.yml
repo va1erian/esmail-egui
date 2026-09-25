@@ -32,27 +32,20 @@ jobs:
         run: cargo build
 
       # The library must not drag in a frontend toolkit: a non-egui consumer
-      # (the future esmail-win32 crate) turns `egui-frontend` off. Fails the
-      # job if egui, eframe, glow or epaint show up in the normal dependency
-      # tree without the feature.
+      # turns `egui-frontend` off. Fails the job if egui, eframe, glow or epaint
+      # show up in the normal dependency tree without the feature. The match is
+      # anchored to the crate-name column so the workspace path
+      # (`. /esmail-egui/...`) cannot be mistaken for a dependency.
       - name: Check the library without the egui frontend
         run: |
           cargo check --lib -p esmail --no-default-features
-          if cargo tree -p esmail --no-default-features -e normal | grep -i -E "egui|eframe|glow|epaint"; then
+          if cargo tree -p esmail --no-default-features -e normal --prefix none | grep -E '^(egui|eframe|egui_glow|egui-litehtml-webview|winit|epaint|glow) '; then
             echo "::error::the esmail library still depends on egui with egui-frontend off"
             exit 1
           fi
 
       - name: Run unit tests
         run: cargo test --workspace
-
-      # esmail-win32 is the egui-free frontend; a dependency that drags egui
-      # (or winit, which only the egui frontend needs) back in defeats it.
-      - name: esmail-win32 stays egui-free
-        run: |
-          if cargo tree -p esmail-win32 -e normal --prefix none | grep -E '^(egui|eframe|egui_glow|egui-litehtml-webview|winit|epaint) '; then
-            echo "esmail-win32 must not depend on egui"; exit 1
-          fi
 
       # mail-mock-server's TLS identity is a committed, throwaway test
       # certificate (crates/mail-mock-server/certs/) -- trusting its CA as
@@ -97,15 +90,9 @@ jobs:
         shell: pwsh
         run: |
           cargo check --lib -p esmail --no-default-features
-          $tree = cargo tree -p esmail --no-default-features -e normal
-          $matches = $tree | Select-String -Pattern 'egui|eframe|glow|epaint'
+          $tree = cargo tree -p esmail --no-default-features -e normal --prefix none
+          $matches = $tree | Select-String -Pattern '^(egui|eframe|egui_glow|egui-litehtml-webview|winit|epaint|glow) '
           if ($matches) {
             Write-Error "the esmail library still depends on egui with egui-frontend off:`n$($matches -join "`n")"
             exit 1
           }
-      - name: esmail-win32 stays egui-free
-        shell: bash
-        run: |
-          if cargo tree -p esmail-win32 -e normal --prefix none | grep -E '^(egui|eframe|egui_glow|egui-litehtml-webview|winit|epaint) '; then
-            echo "esmail-win32 must not depend on egui"; exit 1
-          fi

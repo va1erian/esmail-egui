@@ -3,7 +3,7 @@
 //! The pure, egui-free pieces of the UI live here: the small formatters, the
 //! special-use mailbox lookup, shift-click range selection, and [`RowModel`],
 //! the text half of a message-list row. The egui frontend builds the same
-//! [`RowModel`] and formats the same strings as a future Win32 frontend, so
+//! [`RowModel`] and formats the same strings for any frontend, so
 //! the two cannot drift apart on wording.
 
 use std::collections::BTreeSet;
